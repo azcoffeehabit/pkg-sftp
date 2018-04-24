@@ -1,0 +1,370 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provides nesting for required stacks to deploy a full sample web application
+  with reverse proxy, ELBs, IAM, and other resources (for demonstration/POC/testing)
+  QS(0016)
+Metadata:
+  Stack:
+    Value: 3
+    VersionDate:
+      Value: 20160510
+    Identifier:
+      Value: template-application
+  Input:
+    Description:  S3 bucket and SFTP server and related info
+  Output:
+    Description:  Outputs the IDs of the related resources
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    - Label:
+        default: Region Config
+      Parameters:
+      - pRegionAZ1Name
+      - pRegionAZ2Name
+    - Label:
+        default: Network (existing VPC config)
+      Parameters:
+      - pDMZSubnetA
+      - pDMZSubnetB
+    - Label:
+        default: Application Configuration
+      Parameters:
+      - pSftpInstanceType
+      - pSftpServerAMI
+    - Label:
+        default: SFTP S3 Bucket Configuration
+      Parameters:
+      - pS3SftpTargetBucketName
+    - Label:
+        default: SFTP server
+      Parameters:
+      - QSS3BucketName
+      - QSS3KeyPrefix
+Parameters:
+  pSecurityAlarmTopic:
+    Description: SNS topic for alarms and notifications
+    Type: String
+    Default: ''
+  pEC2KeyPair:
+    Description: Key Name for Instance
+    Type: String
+    Default: ''
+  pProductionCIDR:
+    Description: Production VPC CIDR
+    Type: String
+  pManagementCIDR:
+    Description: Management VPC CIDR
+    Type: String
+  pProductionVPC:
+    Description: Production VPC
+    Type: AWS::EC2::VPC::Id
+  pBastionSSHCIDR:
+    Description: CIDR block (optional) of Public IPs allowed to access Bastion instance
+      in this deployment
+    Type: String
+    Default: 0.0.0.0/0
+  pDMZSubnetA:
+    Description: DMZ Subnet A
+    Type: AWS::EC2::Subnet::Id
+  pDMZSubnetB:
+    Description: DMZ Subnet B
+    Type: AWS::EC2::Subnet::Id
+  pSftpInstanceType:
+    Description: Instance type for the webservers
+    Type: String
+  pRegionAZ1Name:
+    Description: rDBPrivateSubnetB
+    Type: AWS::EC2::AvailabilityZone::Name
+  pRegionAZ2Name:
+    Description: rDBPrivateSubnetB
+    Type: AWS::EC2::AvailabilityZone::Name
+  pSftpServerAMI:
+    Description: Which webserver AMI do you want to use, default
+    Type: String
+    Default: none
+  pEnvironment:
+    Description: Environment type (development, test, or production)
+    Type: String
+    Default: development
+  pSupportsGlacier:
+    Description: Determines whether this region supports Glacier (passed in from main
+      template)
+    Type: String
+    Default: 'true'
+  pS3SftpTargetBucketName:
+    Description: Sftp user bucket
+    Type: String
+    Default: alskjdhfhkajhfsd-user
+  QSS3BucketName:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-.]*[0-9a-zA-Z])*$
+    ConstraintDescription: Quick Start bucket name can include numbers, lowercase
+      letters, uppercase letters, periods (.), and hyphens (-). It cannot start or
+      end with a hyphen (-).
+    Default: alskjdhfhkajhfsd
+    Description: S3 bucket name for the Quick Start assets. Quick Start bucket name
+      can include numbers, lowercase letters, uppercase letters, and hyphens (-).
+      It cannot start or end with a hyphen (-).
+    Type: String
+  QSS3KeyPrefix:
+    AllowedPattern: ^[0-9a-zA-Z-/]*$
+    ConstraintDescription: Quick Start key prefix can include numbers, lowercase letters,
+      uppercase letters, hyphens (-), and forward slash (/).
+    Default: sftp/cloudfomation/pkg-sftp/
+    Description: S3 key prefix for the Quick Start assets. Quick Start key prefix
+      can include numbers, lowercase letters, uppercase letters, hyphens (-), and
+      forward slash (/).
+    Type: String
+Conditions:
+  GovCloudCondition:
+    !Equals
+    - !Ref AWS::Region
+    - us-gov-west-1
+  SupportsGlacier:
+    !Equals
+    - !Ref pSupportsGlacier
+    - 'true'
+Resources:
+  rSecurityGroupSftpInstance:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SFTP Instances in DMZ
+      VpcId: !Ref pProductionVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: udp
+        FromPort: 123
+        ToPort: 123
+        CidrIp: !Ref pProductionCIDR
+      Tags:
+      - Key: Name
+        Value: sg-sftp-dmz-instances
+      - Key: Environment
+        Value: !Ref pEnvironment
+  rSftpInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: S3Assets
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Sid: DescribeVolumes
+            Effect: Allow
+            Action:
+            - ec2:DescribeVolumes
+            Resource: '*'
+  rSftpInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+      - !Ref rSftpInstanceRole
+  rAutoScalingConfigSftp:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn:
+    - rAutoScalingGroupApp
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+          files:
+            /tmp/nginx/default.conf:
+              content: !Sub |
+                server {
+                  listen 80;
+                  charset utf-8;
+                  location / {
+                    resolver xxxxx;
+                    set $elb 'https://${rELBApp.DNSName}';
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header Host $http_host;
+                    proxy_redirect off;
+                    proxy_pass $elb;
+                  }
+                }
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            01-nginx-setup:
+              command: |
+                #!/bin/bash
+                ## Nginx setup
+                sleep 5
+                echo 'Replace resolver placeholder with /etc/resolv.conf nameservers'
+                sed -i "s/xxxxx/$(grep ^nameserver /etc/resolv.conf | sed 's/^nameserver//' | tr -d '\n')/" /tmp/nginx/default.conf
+                cp /tmp/nginx/default.conf /etc/nginx/conf.d/default.conf
+                service nginx stop
+                sed -i '/default_server;/d' /etc/nginx/nginx.conf
+                sleep 10
+                service nginx restart
+          services:
+            sysvinit:
+              nginx:
+                enabled: true
+                ensureRunning: true
+                files:
+                - /etc/nginx/conf.d/default.conf
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId: !Ref pSftpServerAMI
+      IamInstanceProfile: !Ref rSftpInstanceProfile
+      InstanceType: !Ref pSftpInstanceType
+      BlockDeviceMappings:
+      - DeviceName: /dev/sdh
+        Ebs:
+          VolumeSize: 50
+          VolumeType: gp2
+          Encrypted: true
+      KeyName: !Ref pEC2KeyPair
+      SecurityGroups:
+      - !Ref rSecurityGroupSftpInstance
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+
+          EC2_INSTANCE_ID=$(curl -s http://instance-data/latest/meta-data/instance-id)
+
+          ######################################################################
+          # Volume /dev/sdh (which will get created as /dev/xvdh on Amazon Linux)
+
+          DATA_STATE="unknown"
+          until [ "${!DATA_STATE}" == "attached" ]; do
+            DATA_STATE=$(aws ec2 describe-volumes \
+            --region ${AWS::Region} \
+            --filters \
+                  Name=attachment.instance-id,Values=${!EC2_INSTANCE_ID} \
+                  Name=attachment.device,Values=/dev/sdh \
+            --query Volumes[].Attachments[].State \
+            --output text)
+
+            sleep 5
+          done
+
+          # Format /dev/xvdh if it does not contain a partition yet
+          if [ "$(file -b -s /dev/xvdh)" == "data" ]; then
+            mkfs -t ext4 /dev/xvdh
+          fi
+
+          mkdir -p /data
+          mount /dev/xvdh /data
+
+          # Persist the volume in /etc/fstab so it gets mounted again
+          echo '/dev/xvdh /data ext4 defaults,nofail 0 2' >> /etc/fstab
+
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource rAutoScalingConfigSftp --region ${AWS::Region}
+
+          ##Sftp server
+          sleep 5
+
+
+          ## Nginx setup
+          #sleep 5
+          #cp /tmp/nginx/default.conf /etc/nginx/conf.d/default.conf
+          #service nginx stop
+          #sed -i '/default_server;/d' /etc/nginx/nginx.conf
+          #sleep 10
+          #service nginx restart
+  rAutoScalingGroupSftp:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: rAutoScalingConfigSftp
+    Properties:
+      AvailabilityZones:
+      - !Ref pRegionAZ1Name
+      - !Ref pRegionAZ2Name
+      VPCZoneIdentifier:
+      - !Ref pDMZSubnetA
+      - !Ref pDMZSubnetB
+      LaunchConfigurationName: !Ref rAutoScalingConfigSftp
+      MinSize: 2
+      MaxSize: 4
+      LoadBalancerNames:
+      - !Ref rELBSftp
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+      - Key: Name
+        Value: Proxy Server
+        PropagateAtLaunch: true
+      - Key: Environment
+        Value: !Ref pEnvironment
+        PropagateAtLaunch: true
+  rAutoScalingUpSftp:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref rAutoScalingGroupSftp
+      Cooldown: 500
+      ScalingAdjustment: 1
+  rAutoScalingDownSftp:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref rAutoScalingGroupSftp
+      Cooldown: 500
+      ScalingAdjustment: -1
+  rCWAlarmHighCPUSftp:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: 50
+      AlarmDescription: Alarm if CPU too high or metric disappears indicating instance
+        is down
+      Period: 60
+      AlarmActions:
+      - !Ref rAutoScalingUpSftp
+      Namespace: AWS/EC2
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref rAutoScalingGroupSftp
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: SftpServerCpuHighUtilization
+  rCWAlarmLowCPUSftp:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: rAutoScalingGroupSftp
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: 10
+      AlarmDescription: Alarm if CPU too low, remove a Sftp server
+      Period: 60
+      AlarmActions:
+      - !Ref rAutoScalingDownSftp
+      Namespace: AWS/EC2
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref rAutoScalingGroupSftp
+      ComparisonOperator: LessThanThreshold
+      MetricName: SftpServerCpuLowUtilization
+Outputs:
+  rSecurityGroupSftpInstance:
+    Value: !Ref rSecurityGroupSftpInstance
+  Help:
+    Description: For assistance
+    Value: ''
+...

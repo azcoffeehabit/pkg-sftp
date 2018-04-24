@@ -1,0 +1,161 @@
+rsSftpAccessLogs:
+  Type: AWS::S3::Bucket
+  DeletionPolicy: Retain
+  Properties:
+    AccessControl: Private
+rsSftpAccessLogsPolicy:
+  Type: AWS::S3::BucketPolicy
+  DeletionPolicy: Retain
+  Properties:
+    Bucket: !Ref rsSftpAccessLogs
+    PolicyDocument:
+      Version: 2008-10-17
+      Statement:
+      - Sid: SFTPAccessLogs20180423
+        Effect: Allow
+        Resource:
+          !Sub
+          - arn:${Partition}:s3:::${rsSftpAccessLogs}/Logs/AWSLogs/${AWS::AccountId}/*
+          - Partition:
+              !If
+              - GovCloudCondition
+              - aws-us-gov
+              - aws
+        Principal:
+          AWS:
+            !FindInMap
+            - elbMap
+            - !Ref AWS::Region
+            - ELB
+        Action:
+        - s3:PutObject
+
+rSftpTargetBucket:
+  Type: AWS::S3::Bucket
+  DeletionPolicy: Delete
+  Properties:
+    BucketName: !Ref pS3SftpBucketName
+    AccessControl: Private
+    LifecycleConfiguration:
+      Rules:
+      - Id: Transition90daysRetain7yrs
+        Status: Enabled
+        ExpirationInDays: 2555
+        Transition:
+          TransitionInDays: 90
+          StorageClass:
+            !If
+            - SupportsGlacier
+            - GLACIER
+            - STANDARD_IA
+    VersioningConfiguration:
+      Status: Enabled
+  DeletionPolicy: Delete
+rSftpTargetS3Policy:
+  Type: AWS::S3::BucketPolicy
+  DependsOn: rSftpTargetBucket
+  Properties:
+    Bucket: !Ref rSftpTargetBucket
+    PolicyDocument:
+      Statement:
+      - Sid: EnforceSecureTransport
+        Action: s3:*
+        Effect: Deny
+        Principal: '*'
+        Resource:
+          !Sub
+          - arn:${Partition}:s3:::${pS3SftpTargetBucketName}
+          - Partition:
+              !If
+              - GovCloudCondition
+              - aws-us-gov
+              - aws
+        Condition:
+          Bool:
+            aws:SecureTransport: 'false'
+      - Sid: EnforceEncryptionOnPut
+        Effect: Deny
+        Principal: '*'
+        Action: s3:PutObject
+        Resource:
+          !Sub
+          - arn:${Partition}:s3:::${pS3SftpTargetBucketName}/*
+          - Partition:
+              !If
+              - GovCloudCondition
+              - aws-us-gov
+              - aws
+        Condition:
+          StringNotEquals:
+            s3:x-amz-server-side-encryption: AES256
+
+
+
+SftpTemplate:
+  Type: "AWS::CloudFormation::Stack"
+  DependsOn: ProductionVpcTemplate
+
+  Properties:
+    TemplateURL:
+      !Sub
+      - https://${QSS3BucketName}.${QSS3Region}.amazonaws.com/${QSS3KeyPrefix}templates/application.template
+      - QSS3Region:
+        !If
+        - GovCloudCondition
+        - s3-us-gov-west-1
+        - s3
+      TimeoutInMinutes: 30
+      NotificationARNs:
+      - Name
+      Tags:
+      - Sub! '${ApplicationName}'
+  Parameters:
+    pEC2KeyPair: !Ref pEC2KeyPair
+    pProductionCIDR: 10.100.0.0/16
+    pProductionVPC:
+      !GetAtt
+      - ProductionVpcTemplate
+      - Outputs.rVPCProduction
+    pDMZSubnetA:
+      !GetAtt
+      - ProductionVpcTemplate
+      - Outputs.rDMZSubnetA
+    pDMZSubnetB:
+      !GetAtt
+      - ProductionVpcTemplate
+      - Outputs.rDMZSubnetB
+    pSftpInstanceType:
+      !FindInMap
+      - AWSAMIRegionMap
+      - !Ref AWS::Region
+      - InstanceType
+    pManagementCIDR: 10.10.0.0/16
+    pRegionAZ1Name: !Ref pAvailabilityZoneA
+    pRegionAZ2Name: !Ref pAvailabilityZoneB
+    pSftpServerAMI:
+      !FindInMap
+      - AWSAMIRegionMap
+      - !Ref AWS::Region
+      - AMZNLINUXHVM
+    pBastionSSHCIDR: 0.0.0.0/0
+    pSupportsGlacier:
+      !FindInMap
+      - RegionServiceSupport
+      - !Ref AWS::Region
+      - Glacier
+    QSS3BucketName: !Ref QSS3BucketName
+    QSS3KeyPrefix: !Ref QSS3KeyPrefix
+Outputs:
+  TemplateType:
+    Value: SFTP Application Server
+  TeplateVersion:
+    Value: 1.0
+  BastionIP:
+    Description: Use this IP via SSH to connect to Bastion Instance
+    Value:
+      !GetAtt
+      - ManagementVpcTemplate
+      - Outputs.rBastionInstanceIP
+Help:
+  Description: SFTP server template which uses an S3 bucket for the backend data store
+...
