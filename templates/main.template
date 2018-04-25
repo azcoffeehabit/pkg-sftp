@@ -245,15 +245,15 @@ Mappings:
       InstanceTypeDatabase: db.m4.large
     us-gov-west-1:
       AMZNLINUXHVM: ami-ffa61d9e
-      InstanceType: m4.large
+      InstanceType: t2.small
       InstanceTypeDatabase: db.m3.large
     us-west-1:
       AMZNLINUXHVM: ami-bf5540df
-      InstanceType: m4.large
+      InstanceType: t2.small
       InstanceTypeDatabase: db.m4.large
     us-west-2:
       AMZNLINUXHVM: ami-d874e0a0
-      InstanceType: m4.large
+      InstanceType: t2.small
       InstanceTypeDatabase: db.m4.large
 Conditions:
   GovCloudCondition:

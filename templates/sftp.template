@@ -92,9 +92,13 @@ Parameters:
     Type: String
     Default: 'true'
   pS3SftpTargetBucketName:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-.]*[0-9a-zA-Z])*$
+    ConstraintDescription: Quick Start bucket name can include numbers, lowercase
+      letters, uppercase letters, periods (.), and hyphens (-). It cannot start or
+      end with a hyphen (-).
+    Default: alskjdhfhkajhfsd-user
     Description: Sftp user bucket
     Type: String
-    Default: alskjdhfhkajhfsd-user
   QSS3BucketName:
     AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-.]*[0-9a-zA-Z])*$
     ConstraintDescription: Quick Start bucket name can include numbers, lowercase
@@ -181,15 +185,72 @@ Resources:
       Path: /
       Roles:
       - !Ref rSftpInstanceRole
+  rSftpTargetBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Ref pS3SftpTargetBucketName
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+        - Id: Transition90daysRetain7yrs
+          Status: Enabled
+          ExpirationInDays: 2555
+          Transition:
+            TransitionInDays: 90
+            StorageClass:
+              !If
+              - SupportsGlacier
+              - GLACIER
+              - STANDARD_IA
+      VersioningConfiguration:
+        Status: Enabled
+    DeletionPolicy: Delete
+  rSftpTargetS3Policy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: rSftpTargetBucket
+    Properties:
+      Bucket: !Ref rSftpTargetBucket
+      PolicyDocument:
+        Statement:
+        - Sid: EnforceSecureTransport
+          Action: s3:*
+          Effect: Deny
+          Principal: '*'
+          Resource:
+            !Sub
+            - arn:${Partition}:s3:::${pS3SftpTargetBucketName}
+            - Partition:
+                !If
+                - GovCloudCondition
+                - aws-us-gov
+                - aws
+          Condition:
+            Bool:
+              aws:SecureTransport: 'false'
+        - Sid: EnforceEncryptionOnPut
+          Effect: Deny
+          Principal: '*'
+          Action: s3:PutObject
+          Resource:
+            !Sub
+            - arn:${Partition}:s3:::${pS3SftpTargetBucketName}/*
+            - Partition:
+                !If
+                - GovCloudCondition
+                - aws-us-gov
+                - aws
+          Condition:
+            StringNotEquals:
+              s3:x-amz-server-side-encryption: AES256
   rAutoScalingConfigSftp:
     Type: AWS::AutoScaling::LaunchConfiguration
-    DependsOn:
-    - rAutoScalingGroupApp
     Metadata:
       AWS::CloudFormation::Init:
         config:
           packages:
             yum:
+              vim
           files:
             /tmp/nginx/default.conf:
               content: !Sub |
@@ -198,7 +259,7 @@ Resources:
                   charset utf-8;
                   location / {
                     resolver xxxxx;
-                    set $elb 'https://${rELBApp.DNSName}';
+                    set $elb 'https://';
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                     proxy_set_header Host $http_host;
                     proxy_redirect off;
@@ -300,15 +361,13 @@ Resources:
       - !Ref pDMZSubnetA
       - !Ref pDMZSubnetB
       LaunchConfigurationName: !Ref rAutoScalingConfigSftp
-      MinSize: 2
-      MaxSize: 4
-      LoadBalancerNames:
-      - !Ref rELBSftp
-      HealthCheckType: ELB
+      MinSize: 1
+      MaxSize: 1
+      HealthCheckType: EC2
       HealthCheckGracePeriod: 300
       Tags:
       - Key: Name
-        Value: Proxy Server
+        Value: !Sub "${AWS::StackName} Sftp Server"
         PropagateAtLaunch: true
       - Key: Environment
         Value: !Ref pEnvironment
